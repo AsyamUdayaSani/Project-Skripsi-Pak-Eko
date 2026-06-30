@@ -8,7 +8,7 @@ def generate_launch_description():
             executable='stepper_node',
             name='stepper_node',
             parameters=[
-                {'steps_per_rev': 1600},
+                {'steps_per_rev': 1600/1600},
                 {'delay': 0.001},
                 {'direction': 1}
             ],

@@ -25,8 +25,6 @@ class Mapping3D(Node):
 
         super().__init__('mapping_3d')
 
-        self.accumulated_points = []
-
         self.servo_buffer = []
 
         self.latest_imu = None
@@ -58,14 +56,13 @@ class Mapping3D(Node):
             10
         )
 
-        self.timer = self.create_timer(
-            1.0,
-            self.publish_map
-        )
-
         self.get_logger().info(
             'Mapping3D V2 started (LiDAR + Stepper + IMU)'
         )
+
+        self.current_sweep_points = []
+
+        self.last_stepper_angle = None
 
     def imu_callback(self, msg):
 
@@ -92,6 +89,18 @@ class Mapping3D(Node):
         )
 
         angle_rad = msg.data
+
+        if self.last_stepper_angle is not None:
+
+            if (
+                self.last_stepper_angle > 5.5
+                and
+                angle_rad < 0.5
+            ):
+
+                self.publish_current_sweep()
+
+        self.last_stepper_angle = angle_rad
 
         self.servo_buffer.append(
             (
@@ -183,7 +192,7 @@ class Mapping3D(Node):
                 stepper_rotation = (
                     Rotation.from_euler(
                         'x',
-                        -interpolated_servo_angle
+                        -interpolated_servo_angle #INI BIAR GA KEBALIK BOS WKWK HARUS -
                     )
                 )
 
@@ -199,25 +208,15 @@ class Mapping3D(Node):
                     )
                 )
 
-                self.accumulated_points.append(
+                self.current_sweep_points.append(
                     point_global
                 )
 
             scan_angle += msg.angle_increment
 
-        max_points = 100000
+    def publish_current_sweep(self):
 
-        if len(self.accumulated_points) > max_points:
-
-            self.accumulated_points = (
-                self.accumulated_points[
-                    -max_points:
-                ]
-            )
-
-    def publish_map(self):
-
-        if not self.accumulated_points:
+        if len(self.current_sweep_points) < 100:
             return
 
         fields = [
@@ -247,7 +246,7 @@ class Mapping3D(Node):
 
         data = bytearray()
 
-        for p in self.accumulated_points:
+        for p in self.current_sweep_points:
 
             data += struct.pack(
                 'fff',
@@ -271,7 +270,7 @@ class Mapping3D(Node):
         msg.height = 1
 
         msg.width = len(
-            self.accumulated_points
+            self.current_sweep_points
         )
 
         msg.fields = fields
@@ -282,9 +281,7 @@ class Mapping3D(Node):
 
         msg.row_step = (
             12 *
-            len(
-                self.accumulated_points
-            )
+            len(self.current_sweep_points)
         )
 
         msg.data = bytes(data)
@@ -293,6 +290,12 @@ class Mapping3D(Node):
 
         self.map_pub.publish(msg)
 
+        self.get_logger().info(
+            f'Published sweep cloud: {len(self.current_sweep_points)} points'
+        )
+
+        self.current_sweep_points.clear()
+
     def destroy_node(self):
 
         self.get_logger().info(
@@ -300,7 +303,6 @@ class Mapping3D(Node):
         )
 
         super().destroy_node()
-
 
 def main():
 
