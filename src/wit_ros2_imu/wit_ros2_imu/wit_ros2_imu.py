@@ -150,7 +150,7 @@ class IMUDriverNode(Node):
         # 打开串口
 
         try:
-            wt_imu = serial.Serial(port="/dev/imu_usb", baudrate=9600, timeout=0.5)
+            wt_imu = serial.Serial(port="/dev/imu_usb", baudrate=460800, timeout=0.5)
             if wt_imu.isOpen():
                 self.get_logger().info("\033[32mSerial port opened successfully...\033[0m")
             else:
@@ -180,16 +180,9 @@ class IMUDriverNode(Node):
                             self.imu_data()
 
     def imu_data(self):
-        accel_x, accel_y, accel_z = acceleration[0], acceleration[1], acceleration[2]  # struct.unpack('hhh', accel_raw)
-        accel_scale = 16 / 32768.0
-        accel_x, accel_y, accel_z = accel_x * accel_scale, accel_y * accel_scale, accel_z * accel_scale
-
-        # 读取陀螺仪数据
-        gyro_x, gyro_y, gyro_z = angularVelocity[0], angularVelocity[1], angularVelocity[
-            2]  # struct.unpack('hhh', gyro_raw)
-        gyro_scale = 2000 / 32768.0
-        gyro_x, gyro_y, gyro_z = math.radians(gyro_x * gyro_scale), math.radians(gyro_y * gyro_scale), math.radians(
-            gyro_z * gyro_scale)
+        # Data sudah dikonversi di handle_serial_data, langsung pakai tanpa konversi ulang
+        accel_x, accel_y, accel_z = acceleration[0], acceleration[1], acceleration[2]
+        gyro_x, gyro_y, gyro_z = angularVelocity[0], angularVelocity[1], angularVelocity[2]
 
         # 计算角速度
         dt = 0.01
@@ -199,12 +192,12 @@ class IMUDriverNode(Node):
 
         # 更新IMU消息
         self.imu_msg.header.stamp = self.get_clock().now().to_msg()
-        self.imu_msg.linear_acceleration.x = accel_x
-        self.imu_msg.linear_acceleration.y = accel_y
-        self.imu_msg.linear_acceleration.z = accel_z
-        self.imu_msg.angular_velocity.x = gyro_x
-        self.imu_msg.angular_velocity.y = gyro_y
-        self.imu_msg.angular_velocity.z = gyro_z
+        self.imu_msg.linear_acceleration.x = float(accel_x)
+        self.imu_msg.linear_acceleration.y = float(accel_y)
+        self.imu_msg.linear_acceleration.z = float(accel_z)
+        self.imu_msg.angular_velocity.x = float(gyro_x)
+        self.imu_msg.angular_velocity.y = float(gyro_y)
+        self.imu_msg.angular_velocity.z = float(gyro_z)
 
         angle_radian = [angle_degree[i] * math.pi / 180 for i in range(3)]
 
