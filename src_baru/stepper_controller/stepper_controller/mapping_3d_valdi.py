@@ -1,0 +1,368 @@
+import rclpy
+from rclpy.node import Node
+
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField
+from std_msgs.msg import Header, Float32
+
+import numpy as np
+import struct
+from scipy.spatial.transform import Rotation
+
+import csv
+import os
+
+
+class Mapping3D(Node):
+
+    def __init__(self):
+        super().__init__('mapping_3d')
+
+        self.servo_buffer = []
+        self.current_sweep_points = []
+        self.last_stepper_angle = None
+
+        # =============================
+        # Validation Variables
+        # =============================
+        self.sweep_count = 0
+
+        self.scan_count = 0
+
+        self.sweep_start_time = None
+
+        self.csv_file = "mapping_validation.csv"
+
+        # buat header csv kalau belum ada
+        if not os.path.exists(self.csv_file):
+            with open(self.csv_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Sweep",
+                    "Actual_RPM",
+                    "Sweep_Time(s)",
+                    "Scan_Count",
+                    "Point per Sweep",
+                    "Angular_Resolution(deg)",
+                    "Point_Rate(point/s)"
+                ])
+
+        # Subscribers
+        self.create_subscription(
+            Float32,
+            '/stepper/angle',
+            self.servo_callback,
+            50
+        )
+
+        self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            10
+        )
+
+        # Publisher
+        self.map_pub = self.create_publisher(
+            PointCloud2,
+            '/map_3d',
+            10
+        )
+
+        self.get_logger().info(
+            'Mapping3D V2 started (LiDAR + Stepper)'
+        )
+
+    # ==========================================================
+    # Utility
+    # ==========================================================
+
+    def get_time_sec(self, header=None, clock_time=None):
+        if header is not None:
+            return header.stamp.sec + header.stamp.nanosec * 1e-9
+
+        if clock_time is not None:
+            return clock_time.nanoseconds * 1e-9
+
+        return 0.0
+
+    # ==========================================================
+    # Stepper Callback
+    # ==========================================================
+
+    def servo_callback(self, msg):
+
+        current_time = self.get_time_sec(
+            clock_time=self.get_clock().now()
+        )
+        if self.sweep_start_time is None:
+            self.sweep_start_time = current_time
+
+        angle = msg.data
+
+        # Deteksi satu putaran selesai
+        if self.last_stepper_angle is not None:
+            if self.last_stepper_angle > 5.5 and angle < 0.5:
+                self.publish_current_sweep()
+
+        self.last_stepper_angle = angle
+
+        self.servo_buffer.append(
+            (current_time, angle)
+        )
+
+        if len(self.servo_buffer) > 100:
+            self.servo_buffer.pop(0)
+
+    # ==========================================================
+    # LiDAR Callback
+    # ==========================================================
+
+    def scan_callback(self, msg):
+        self.scan_count += 1
+
+        if len(self.servo_buffer) < 2:
+            return
+
+        servo_times = np.array([
+            item[0] for item in self.servo_buffer
+        ])
+
+        servo_angles = np.array([
+            item[1] for item in self.servo_buffer
+        ])
+
+        scan_start_time = self.get_time_sec(header=msg.header)
+
+        time_increment = msg.time_increment
+
+        if time_increment <= 0.0:
+            time_increment = (1.0 / 10.0) / len(msg.ranges)
+
+        scan_angle = msg.angle_min
+
+        for i, distance in enumerate(msg.ranges):
+
+            if msg.range_min < distance < msg.range_max:
+
+                ray_time = scan_start_time + i * time_increment
+
+                servo_angle = np.interp(
+                    ray_time,
+                    servo_times,
+                    servo_angles
+                )
+
+                # Titik pada frame LiDAR
+                x = distance * np.cos(scan_angle)
+                y = distance * np.sin(scan_angle)
+                z = 0.0
+
+                point = np.array([x, y, z])
+
+                # Rotasi Stepper
+                stepper_rotation = Rotation.from_euler(
+                    'x',
+                    -servo_angle
+                )
+
+                point_rotated = stepper_rotation.apply(point)
+
+                offset_time = ray_time - scan_start_time
+
+                if i == 0:
+                    self.get_logger().info(
+                        f"first offset = {offset_time:.6f}"
+                    )
+
+                if i == len(msg.ranges) - 1:
+                    self.get_logger().info(
+                        f"last offset = {offset_time:.6f}"
+                    )
+                intensity = (
+                    msg.intensities[i]
+                    if i < len(msg.intensities)
+                    else 0.0
+		)
+
+                self.current_sweep_points.append(
+                    (
+                        point_rotated[0],
+                        point_rotated[1],
+                        point_rotated[2],
+                        float(intensity),
+                        0,
+                        float(offset_time)
+                    )
+                )
+
+            scan_angle += msg.angle_increment
+
+    # ==========================================================
+    # Publish PointCloud
+    # ==========================================================
+
+    def publish_current_sweep(self):
+
+        if len(self.current_sweep_points) < 100:
+            return
+        current_time = self.get_time_sec(
+            clock_time=self.get_clock().now()
+        )
+
+        self.sweep_count += 1
+
+        sweep_time = current_time - self.sweep_start_time
+
+        point_count = len(self.current_sweep_points)
+
+        if sweep_time <= 0:
+            return
+
+        actual_rpm = 60.0 / sweep_time
+
+        angular_resolution = (
+            360.0 / self.scan_count
+            if self.scan_count > 0
+            else 0
+        )
+
+        point_rate = (
+            point_count / sweep_time
+            if sweep_time > 0
+            else 0
+        )
+
+        fields = [
+            PointField(
+                name='x',
+                offset=0,
+                datatype=PointField.FLOAT32,
+                count=1
+            ),
+            PointField(
+                name='y',
+                offset=4,
+                datatype=PointField.FLOAT32,
+                count=1
+            ),
+            PointField(
+                name='z',
+                offset=8,
+                datatype=PointField.FLOAT32,
+                count=1
+            ),
+            PointField(
+                name='intensity',
+                offset=12,
+                datatype=PointField.FLOAT32,
+                count=1
+            ),
+            PointField(
+                name='ring',
+                offset=16,
+                datatype=PointField.UINT16,
+                count=1
+            ),
+	    PointField(
+		name='time',
+		offset=20,
+		datatype=PointField.FLOAT32,
+		count=1
+	    )
+        ]
+
+        data = bytearray()
+
+        for point in self.current_sweep_points:
+            data += struct.pack(
+                'ffffH2xf',
+                float(point[0]),
+                float(point[1]),
+                float(point[2]),
+                float(point[3]),
+                int(point[4]),
+		float(point[5])
+            )
+
+        cloud = PointCloud2()
+
+        cloud.header = Header()
+        cloud.header.stamp = self.get_clock().now().to_msg()
+
+        # Frame LiDAR
+        cloud.header.frame_id = "lidar_tilt"
+
+        cloud.height = 1
+        cloud.width = len(self.current_sweep_points)
+
+        cloud.fields = fields
+
+        cloud.is_bigendian = False
+        cloud.point_step = 24
+        cloud.row_step = cloud.point_step * cloud.width
+        cloud.data = bytes(data)
+        cloud.is_dense = True
+
+        self.map_pub.publish(cloud)
+        print("\n===============================")
+        print(f"Sweep              : {self.sweep_count}")
+        print(f"Actual RPM         : {actual_rpm:.2f}")
+        print(f"Sweep Time         : {sweep_time:.2f} s")
+        print(f"Scan Count         : {self.scan_count}")
+        print(f"Point per Sweep    : {point_count}")
+        print(f"Angular Resolution : {angular_resolution:.2f} deg")
+        print(f"Point Rate         : {point_rate:.2f} point/s")
+        print("===============================\n")
+
+        with open(self.csv_file, "a", newline="") as f:
+
+            writer = csv.writer(f)
+
+            writer.writerow([
+                self.sweep_count,
+                round(actual_rpm,2),
+                round(sweep_time,2),
+                self.scan_count,
+                point_count,
+                round(angular_resolution,2),
+                round(point_rate,2)
+            ])
+
+        self.scan_count = 0
+
+        self.sweep_start_time = current_time
+
+        self.get_logger().info(
+            f'Published sweep cloud: {cloud.width} points'
+        )
+
+        self.current_sweep_points.clear()
+
+    # ==========================================================
+    # Shutdown
+    # ==========================================================
+
+    def destroy_node(self):
+        self.get_logger().info('Mapping3D stopped')
+        super().destroy_node()
+
+
+def main():
+
+    rclpy.init()
+
+    node = Mapping3D()
+
+    try:
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+        pass
+
+    node.destroy_node()
+
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
